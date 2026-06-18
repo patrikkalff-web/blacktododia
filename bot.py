@@ -1,4 +1,4 @@
-import os, time, logging, requests
+import os, time, logging, requests, json
 from telegram import Bot
 from telegram.constants import ParseMode
 
@@ -7,39 +7,43 @@ TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL")
 ML_AFFILIATE_ID  = os.getenv("ML_AFFILIATE_ID", "carbonocarbono20230310011151")
 INTERVALO_MINUTOS = 30
 
-BUSCAS = [
-    "fone bluetooth", "tenis nike", "fritadeira air fryer",
-    "smartwatch", "notebook", "cafeteira", "mochila",
-    "celular samsung", "tv smart", "perfume importado"
-]
-
 logging.basicConfig(format="%(asctime)s — %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 posted_ids = set()
-busca_idx = 0
 
-def buscar_ml(query):
+def buscar_pelando():
     try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept": "application/json",
+        }
         r = requests.get(
-            "https://api.mercadolibre.com/sites/MLB/search",
-            params={"q": query, "limit": 5, "sort": "relevance"},
-            headers={"User-Agent": "Mozilla/5.0"},
+            "https://api.pelando.com.br/api/threads?types=deal&page=1&size=20&orderBy=hottest",
+            headers=headers,
             timeout=15
         )
-        log.info(f"ML status: {r.status_code} para '{query}'")
-        return r.json().get("results", [])
+        log.info(f"Pelando status: {r.status_code}")
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("data", {}).get("threads", {}).get("items", [])
+        return []
     except Exception as e:
-        log.warning(f"Erro: {e}")
+        log.warning(f"Erro Pelando: {e}")
         return []
 
-def gerar_link(item_id):
-    return f"https://mercadolivre.com.br/p/{item_id}?tracking_id={ML_AFFILIATE_ID}"
+def formatar_mensagem(oferta):
+    titulo    = oferta.get("title", "Oferta")
+    preco     = oferta.get("price", 0)
+    original  = oferta.get("nextBestPrice") or oferta.get("originalPrice", 0)
+    loja      = oferta.get("merchant", {}).get("name", "Loja") if oferta.get("merchant") else "Loja"
+    url       = oferta.get("sourceUrl", "")
 
-def formatar_mensagem(item, link):
-    titulo   = item.get("title", "Produto")
-    preco    = item.get("price", 0)
-    original = item.get("original_price")
-    partes   = [f"🔥 *{titulo}*\n"]
+    # adiciona tag de afiliado ML se for link do ML
+    if "mercadolivre" in url or "mercadopago" in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}tracking_id={ML_AFFILIATE_ID}"
+
+    partes = [f"🔥 *{titulo}*\n", f"🏪 Loja: {loja}"]
     if original and original > preco:
         desconto = round((1 - preco/original)*100, 1)
         partes.append(f"🔴 De: ~R$ {original:,.2f}~")
@@ -47,33 +51,35 @@ def formatar_mensagem(item, link):
         partes.append(f"💥 *{desconto}% OFF*\n")
     else:
         partes.append(f"💰 *R$ {preco:,.2f}*\n")
-    partes.append(f"🛒 [COMPRAR AGORA]({link})")
+    partes.append(f"🛒 [VER OFERTA]({url})")
     partes.append(f"\n📢 {TELEGRAM_CHANNEL}")
     return "\n".join(partes)
 
 def processar_e_postar(bot):
-    global busca_idx
-    query = BUSCAS[busca_idx % len(BUSCAS)]
-    busca_idx += 1
-    log.info(f"Buscando: '{query}'")
-    itens = buscar_ml(query)
-    log.info(f"Itens encontrados: {len(itens)}")
-    for item in itens:
-        item_id = item.get("id")
-        if item_id in posted_ids:
+    ofertas = buscar_pelando()
+    log.info(f"Ofertas encontradas: {len(ofertas)}")
+    for oferta in ofertas:
+        oid = oferta.get("id")
+        if oid in posted_ids:
             continue
-        link     = gerar_link(item_id)
-        mensagem = formatar_mensagem(item, link)
-        thumbnail = item.get("thumbnail","").replace("I.jpg","O.jpg")
+        mensagem = formatar_mensagem(oferta)
+        imagem   = oferta.get("image", {}).get("url") if oferta.get("image") else None
         try:
-            bot.send_photo(
-                chat_id=TELEGRAM_CHANNEL,
-                photo=thumbnail,
-                caption=mensagem,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            posted_ids.add(item_id)
-            log.info(f"✅ Postado: {item.get('title')}")
+            if imagem:
+                bot.send_photo(
+                    chat_id=TELEGRAM_CHANNEL,
+                    photo=imagem,
+                    caption=mensagem,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                bot.send_message(
+                    chat_id=TELEGRAM_CHANNEL,
+                    text=mensagem,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            posted_ids.add(oid)
+            log.info(f"✅ Postado: {oferta.get('title')}")
             time.sleep(3)
             return
         except Exception as e:
