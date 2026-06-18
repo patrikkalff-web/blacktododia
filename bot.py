@@ -1,4 +1,5 @@
-import os, time, logging, requests, json
+import os, time, logging, requests
+import xml.etree.ElementTree as ET
 from telegram import Bot
 from telegram.constants import ParseMode
 
@@ -11,79 +12,75 @@ logging.basicConfig(format="%(asctime)s — %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 posted_ids = set()
 
-def buscar_pelando():
+FEEDS = [
+    "https://www.pelando.com.br/api/feed/hot.rss",
+    "https://www.promobit.com.br/feed/",
+]
+
+def buscar_feed(url):
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
-            "Accept": "application/json",
-        }
-        r = requests.get(
-            "https://api.pelando.com.br/api/threads?types=deal&page=1&size=20&orderBy=hottest",
-            headers=headers,
-            timeout=15
-        )
-        log.info(f"Pelando status: {r.status_code}")
-        if r.status_code == 200:
-            data = r.json()
-            return data.get("data", {}).get("threads", {}).get("items", [])
-        return []
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        log.info(f"Feed {url}: status {r.status_code}")
+        if r.status_code != 200:
+            return []
+        root = ET.fromstring(r.content)
+        items = []
+        for item in root.findall(".//item"):
+            titulo = item.findtext("title", "")
+            link   = item.findtext("link", "")
+            desc   = item.findtext("description", "")
+            guid   = item.findtext("guid", link)
+            imagem = ""
+            enc    = item.find("enclosure")
+            if enc is not None:
+                imagem = enc.get("url", "")
+            items.append({"titulo": titulo, "link": link, "desc": desc, "guid": guid, "imagem": imagem})
+        return items
     except Exception as e:
-        log.warning(f"Erro Pelando: {e}")
+        log.warning(f"Erro feed: {e}")
         return []
 
 def formatar_mensagem(oferta):
-    titulo    = oferta.get("title", "Oferta")
-    preco     = oferta.get("price", 0)
-    original  = oferta.get("nextBestPrice") or oferta.get("originalPrice", 0)
-    loja      = oferta.get("merchant", {}).get("name", "Loja") if oferta.get("merchant") else "Loja"
-    url       = oferta.get("sourceUrl", "")
-
-    # adiciona tag de afiliado ML se for link do ML
-    if "mercadolivre" in url or "mercadopago" in url:
-        sep = "&" if "?" in url else "?"
-        url = f"{url}{sep}tracking_id={ML_AFFILIATE_ID}"
-
-    partes = [f"🔥 *{titulo}*\n", f"🏪 Loja: {loja}"]
-    if original and original > preco:
-        desconto = round((1 - preco/original)*100, 1)
-        partes.append(f"🔴 De: ~R$ {original:,.2f}~")
-        partes.append(f"🟢 Por: *R$ {preco:,.2f}*")
-        partes.append(f"💥 *{desconto}% OFF*\n")
-    else:
-        partes.append(f"💰 *R$ {preco:,.2f}*\n")
-    partes.append(f"🛒 [VER OFERTA]({url})")
-    partes.append(f"\n📢 {TELEGRAM_CHANNEL}")
-    return "\n".join(partes)
+    titulo = oferta["titulo"]
+    link   = oferta["link"]
+    if "mercadolivre" in link or "meli" in link:
+        sep  = "&" if "?" in link else "?"
+        link = f"{link}{sep}tracking_id={ML_AFFILIATE_ID}"
+    return (
+        f"🔥 *{titulo}*\n\n"
+        f"🛒 [VER OFERTA]({link})\n\n"
+        f"📢 {TELEGRAM_CHANNEL}"
+    )
 
 def processar_e_postar(bot):
-    ofertas = buscar_pelando()
-    log.info(f"Ofertas encontradas: {len(ofertas)}")
-    for oferta in ofertas:
-        oid = oferta.get("id")
-        if oid in posted_ids:
-            continue
-        mensagem = formatar_mensagem(oferta)
-        imagem   = oferta.get("image", {}).get("url") if oferta.get("image") else None
-        try:
-            if imagem:
-                bot.send_photo(
-                    chat_id=TELEGRAM_CHANNEL,
-                    photo=imagem,
-                    caption=mensagem,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            else:
-                bot.send_message(
-                    chat_id=TELEGRAM_CHANNEL,
-                    text=mensagem,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            posted_ids.add(oid)
-            log.info(f"✅ Postado: {oferta.get('title')}")
-            time.sleep(3)
-            return
-        except Exception as e:
-            log.error(f"Erro ao postar: {e}")
+    for feed_url in FEEDS:
+        ofertas = buscar_feed(feed_url)
+        log.info(f"Ofertas no feed: {len(ofertas)}")
+        for oferta in ofertas:
+            guid = oferta["guid"]
+            if guid in posted_ids:
+                continue
+            mensagem = formatar_mensagem(oferta)
+            try:
+                if oferta["imagem"]:
+                    bot.send_photo(
+                        chat_id=TELEGRAM_CHANNEL,
+                        photo=oferta["imagem"],
+                        caption=mensagem,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    bot.send_message(
+                        chat_id=TELEGRAM_CHANNEL,
+                        text=mensagem,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                posted_ids.add(guid)
+                log.info(f"✅ Postado: {oferta['titulo']}")
+                time.sleep(3)
+                return
+            except Exception as e:
+                log.error(f"Erro ao postar: {e}")
 
 def main():
     log.info("🤖 BlackTodoDia Bot iniciado!")
